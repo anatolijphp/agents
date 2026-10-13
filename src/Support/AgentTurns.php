@@ -46,11 +46,12 @@ class AgentTurns
                 ->orderBy('id')->get()->first(fn (AgentTurn $t) => $t->decisions() !== null);
 
             if ($held) {
-                // `sync` from either one: a decision made through AgentRun or a command runs here, not on a worker.
+                // `sync` from this request alone, which is the one that starts the turn: a decision made through AgentRun
+                // or a command runs here, one from a chat goes to a worker whatever the first decision asked.
                 $held->forceFill(['input' => array_filter([
                     ...$held->input,
                     'decisions' => [...$held->decisions(), ...$input['decisions']],
-                    'sync' => ($held->input['sync'] ?? false) || ($input['sync'] ?? false) ? true : null,
+                    'sync' => ($input['sync'] ?? false) ? true : null,
                 ], fn ($v) => $v !== null)])->save();
                 $this->startNext($conversationId);
 
@@ -66,7 +67,7 @@ class AgentTurns
             $store = app(AgentConversationStore::class);
             $undecided = array_diff_key($store->pendingCalls($conversationId, $participant), $held->decisions());
             $decided = $undecided !== [] ? app(TypedDecisions::class)->decide($input['prompt'], $undecided, $model) : null;
-            $sync = ($held->input['sync'] ?? false) || ($input['sync'] ?? false) ? true : null;
+            $sync = ($input['sync'] ?? false) ? true : null;
 
             if ($decided !== null) {
                 $held->forceFill([
@@ -83,14 +84,15 @@ class AgentTurns
                 return $held->refresh();
             }
 
-            if ($undecided !== []) {
-                $held->forceFill(['input' => array_filter([
-                    ...$held->input,
+            // Even when nothing is left to decline (the answer is gone), so a stale `sync` from the first decision is dropped.
+            $held->forceFill(['input' => array_filter([
+                ...$held->input,
+                ...($undecided !== [] ? [
                     'decisions' => [...$held->decisions(), ...array_fill_keys(array_keys($undecided), false)],
                     'superseded' => array_keys($undecided),
-                    'sync' => $sync,
-                ], fn ($v) => $v !== null)])->save();
-            }
+                ] : []),
+                'sync' => $sync,
+            ], fn ($v) => $v !== null)])->save();
         }
 
         $turn = AgentTurn::query()->create([

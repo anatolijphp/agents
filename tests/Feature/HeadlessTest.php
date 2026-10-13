@@ -57,7 +57,7 @@ it('boots without Filament, on the Laravel context', function () {
 
 it('serves MCP with draw-chart as the only default tool, then the registered tools by token', function () {
     $user = $this->user();
-    $this->widgets();
+    [$alpha] = $this->widgets();
     $mcp = ['Accept' => 'application/json, text/event-stream', 'MCP-Protocol-Version' => '2025-06-18'];
     $headers = fn (string $token) => ['Authorization' => 'Bearer '.$token] + $mcp;
     $list = fn (string $token) => postJson('/mcp', ['jsonrpc' => '2.0', 'id' => 1, 'method' => 'tools/list'], $headers($token))->assertOk()->json('result.tools.*.name');
@@ -82,15 +82,15 @@ it('serves MCP with draw-chart as the only default tool, then the registered too
     expect($seen)->toBe(['user' => $user->id, 'guard' => 'sanctum', 'tenant' => null, 'locale' => 'de']);
 
     auth()->forgetGuards();
-    $call('retire-widget', ['id' => 1], $read)->assertStatus(400)->assertJsonPath('error.message', 'Tool [retire-widget] not found.');
+    $call('retire-widget', ['id' => $alpha->id], $read)->assertStatus(400)->assertJsonPath('error.message', 'Tool [retire-widget] not found.');
 
     // A scoped write token: the tools it names, and only those.
     auth()->forgetGuards();
     $scoped = $user->createToken('queue', ['read', 'write', 'tool:retire-widget'])->plainTextToken;
     expect($list($scoped))->toBe(['retire-widget']);
     auth()->forgetGuards();
-    $call('retire-widget', ['id' => 1], $scoped)->assertOk()->assertJsonPath('result.isError', false);
-    expect(Widget::query()->find(1)->status)->toBe('retired');
+    $call('retire-widget', ['id' => $alpha->id], $scoped)->assertOk()->assertJsonPath('result.isError', false);
+    expect(Widget::query()->find($alpha->id)->status)->toBe('retired');
     auth()->forgetGuards();
     $call('who-am-i', [], $scoped)->assertStatus(400)->assertJsonPath('error.message', 'Tool [who-am-i] not found.');
 });
@@ -467,6 +467,69 @@ it('runs a held decision in the request when the decision that completes it was 
     expect($held->decisions())->toBe(['c1' => true, 'c2' => false])
         ->and($held->input['sync'] ?? null)->toBeTrue();
     Queue::assertPushed(RunAgentTurn::class, fn (RunAgentTurn $job) => $job->turnId === $held->id && $job->connection === 'sync');
+});
+
+it('hands a held decision to a worker when the request that completes it did not ask to run it, whatever the first one asked', function () {
+    $user = $this->user();
+    actingAs($user);
+    Queue::fake();
+    $store = app(AgentConversationStore::class);
+    $turns = app(AgentTurns::class);
+
+    // The first decision came through AgentRun (sync), the second is a click in a chat: that request has returned,
+    // so the chat's request does not run the turn itself.
+    $conversation = $store->startConversation($user, 'Retire Alpha and Beta');
+    pausedAnswer($user, $conversation);
+    $turns->enqueue($conversation, $user, ['decisions' => ['c1' => true], 'sync' => true], null, 'auto', null);
+    $held = $turns->enqueue($conversation, $user, ['decisions' => ['c2' => false]], null, 'auto', null);
+
+    expect($held->decisions())->toBe(['c1' => true, 'c2' => false])
+        ->and($held->input)->not->toHaveKey('sync');
+    Queue::assertPushed(RunAgentTurn::class, fn (RunAgentTurn $job) => $job->turnId === $held->id && $job->connection !== 'sync');
+
+    // The same for a reply typed in a chat after that decision (#44).
+    $typed = $store->startConversation($user, 'Retire Alpha and Beta');
+    pausedAnswer($user, $typed);
+    $first = $turns->enqueue($typed, $user, ['decisions' => ['c1' => true], 'sync' => true], null, 'auto', null);
+    $turn = $turns->enqueue($typed, $user, ['prompt' => 'No, leave them.'], null, 'auto', null);
+
+    expect($turn->id)->toBe($first->id)
+        ->and($turn->decisions())->toBe(['c1' => true, 'c2' => false])
+        ->and($turn->input)->not->toHaveKey('sync');
+    Queue::assertPushed(RunAgentTurn::class, fn (RunAgentTurn $job) => $job->turnId === $turn->id && $job->connection !== 'sync');
+});
+
+it('hands a held decision to a worker before a question typed in a chat after it, whatever the first decision asked (#44)', function () {
+    $user = $this->user();
+    actingAs($user);
+    Queue::fake();
+    $store = app(AgentConversationStore::class);
+    $turns = app(AgentTurns::class);
+
+    // A click sent through AgentRun (sync), then a question from a chat: the question declines Beta, the waiting turn
+    // goes to the worker first, and the question waits for it.
+    $conversation = $store->startConversation($user, 'Retire Alpha and Beta');
+    pausedAnswer($user, $conversation);
+    $held = $turns->enqueue($conversation, $user, ['decisions' => ['c1' => true], 'sync' => true], null, 'auto', null);
+    $question = $turns->enqueue($conversation, $user, ['prompt' => "What happens to Beta's orders?"], null, 'auto', null);
+
+    expect($held->fresh()->status)->toBe(AgentTurn::PENDING)
+        ->and($held->fresh()->decisions())->toBe(['c1' => true, 'c2' => false])
+        ->and($held->fresh()->input['superseded'])->toBe(['c2'])
+        ->and($held->fresh()->input)->not->toHaveKey('sync')
+        ->and($question->status)->toBe(AgentTurn::QUEUED);
+    Queue::assertPushed(RunAgentTurn::class, fn (RunAgentTurn $job) => $job->turnId === $held->id && $job->connection !== 'sync');
+    Queue::assertNotPushed(RunAgentTurn::class, fn (RunAgentTurn $job) => $job->turnId === $question->id);
+
+    // The same when the waiting turn's answer is gone, so nothing is left to decline.
+    $gone = $store->startConversation($user, 'Retire Alpha and Beta');
+    $paused = pausedAnswer($user, $gone);
+    $held = $turns->enqueue($gone, $user, ['decisions' => ['c1' => true], 'sync' => true], null, 'auto', null);
+    $paused->delete();
+    $turns->enqueue($gone, $user, ['prompt' => 'Where did it go?'], null, 'auto', null);
+
+    expect($held->fresh()->input)->not->toHaveKey('sync')->not->toHaveKey('superseded');
+    Queue::assertPushed(RunAgentTurn::class, fn (RunAgentTurn $job) => $job->turnId === $held->id && $job->connection !== 'sync');
 });
 
 it('enters with a tenant key that resolves to nothing when the app has no workspace model, as before', function () {
