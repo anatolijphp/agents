@@ -5,7 +5,6 @@ namespace Packstub\Agents\Ai\Middleware;
 use Closure;
 use Laravel\Ai\Messages\Message;
 use Laravel\Ai\Messages\MessageRole;
-use Laravel\Ai\Messages\UserMessage;
 use Laravel\Ai\PendingStep;
 use Packstub\Agents\Ai\Agent;
 
@@ -15,8 +14,13 @@ use Packstub\Agents\Ai\Agent;
  * instructions, the tool list and the history in front of it are
  * byte-identical from one turn to the next and the provider's prompt cache
  * keeps hitting. It runs last: the app's middleware reads the question as
- * typed. The block is written once per turn and put on the question again
- * on every step of it, so the model reads the same messages while it calls
+ * typed. The block is written once per turn, into the question message
+ * itself, so the step's messages stay the very array laravel/ai sent: a
+ * provider's stateful continuation (previous_response_id on OpenAI and
+ * xAI) replays only unchanged messages, and a replaced message would have
+ * cost every tool step the whole history again. laravel/ai builds that
+ * message from the prompt string for the loop alone, so the stored question
+ * stays as typed, and the model reads the same messages while it calls
  * tools. A turn that resumes an approval has no question to carry it and
  * goes without — the model continues the step the block already informed.
  */
@@ -43,21 +47,25 @@ class AttachContext
             return $next($step);
         }
 
-        $messages = $step->messages;
+        $question = self::question($step->messages);
 
+        // In place, and once: the tool steps of the turn carry the same message object, already informed.
+        if ($question !== null && ! str_starts_with((string) $question->content, $block.PHP_EOL)) {
+            $question->content = $block.PHP_EOL.PHP_EOL.$question->content;
+        }
+
+        return $next($step);
+    }
+
+    /** The last user message of the step, the question the turn answers. */
+    protected static function question(array $messages): ?Message
+    {
         for ($i = count($messages) - 1; $i >= 0; $i--) {
-            $message = $messages[$i];
-
-            if ($message instanceof Message && $message->role === MessageRole::User) {
-                $content = $block.PHP_EOL.PHP_EOL.$message->content;
-                $messages[$i] = $message instanceof UserMessage
-                    ? new UserMessage($content, $message->attachments)
-                    : new Message(MessageRole::User, $content);
-
-                break;
+            if ($messages[$i] instanceof Message && $messages[$i]->role === MessageRole::User) {
+                return $messages[$i];
             }
         }
 
-        return $next($step->withMessages($messages));
+        return null;
     }
 }
