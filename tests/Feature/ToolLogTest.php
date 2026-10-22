@@ -79,7 +79,7 @@ it('records a chat write from the model\'s call through the person\'s approval t
     $row = AgentToolCall::query()->sole();
     expect($row)->toMatchArray([
         'call_id' => 'c1', 'channel' => 'agent', 'turn_id' => $proposing->id, 'conversation_id' => $conversation,
-        'participant_type' => $user->getMorphClass(), 'participant_id' => $user->id, 'tool' => 'rename-widget', 'arguments' => $arguments,
+        'participant_type' => $user->getMorphClass(), 'participant_id' => $user->id, 'tool' => 'rename-widget', 'ability' => 'widgets.manage', 'arguments' => $arguments,
         'status' => AgentToolCall::PROPOSED, 'question' => "Rename widget #{$alpha->id} to Alpha II?", 'decision' => null,
     ]);
 
@@ -118,7 +118,7 @@ it('records a rejected proposal as rejected and finished, without it ever runnin
     AgentChat::for($user, $conversation)->decide('c1', false);
 
     $row = AgentToolCall::query()->sole();
-    expect($row)->toMatchArray(['status' => AgentToolCall::REJECTED, 'decision' => 'rejected', 'result' => null])
+    expect($row)->toMatchArray(['status' => AgentToolCall::REJECTED, 'decision' => 'rejected', 'ability' => 'widgets.manage', 'result' => null])
         ->and($row->finished_at)->not->toBeNull()
         ->and($alpha->fresh()->name)->toBe('Alpha');
 
@@ -362,7 +362,7 @@ it('records what a turn streams: the read it ran, the write it proposed, then th
     [$read, $write] = AgentToolCall::query()->orderBy('id')->get();
     expect($read)->toMatchArray(['call_id' => 'r1', 'channel' => 'agent', 'turn_id' => $asked->id, 'tool' => 'list-widgets', 'status' => AgentToolCall::SUCCEEDED])
         ->and($read->result['total'])->toBe(2)
-        ->and($write)->toMatchArray(['call_id' => 'w1', 'turn_id' => $asked->id, 'status' => AgentToolCall::PROPOSED, 'question' => "Rename widget #{$alpha->id} to Alpha II?"]);
+        ->and($write)->toMatchArray(['call_id' => 'w1', 'turn_id' => $asked->id, 'ability' => 'widgets.manage', 'status' => AgentToolCall::PROPOSED, 'question' => "Rename widget #{$alpha->id} to Alpha II?"]);
 
     WidgetAgent::fake(['Renamed.']);
     AgentChat::for($user, $conversation)->decide('w1', true);
@@ -384,7 +384,7 @@ it('records a proposal a typed question superseded as superseded and finished, w
 
     $row = AgentToolCall::query()->sole();
     expect($asked->fresh()->status)->toBe(AgentTurn::DONE)
-        ->and($row)->toMatchArray(['status' => AgentToolCall::REJECTED, 'decision' => 'superseded', 'turn_id' => $proposing->id, 'result' => null])
+        ->and($row)->toMatchArray(['status' => AgentToolCall::REJECTED, 'decision' => 'superseded', 'ability' => 'widgets.manage', 'turn_id' => $proposing->id, 'result' => null])
         ->and($row->decided_at)->not->toBeNull()
         ->and($row->finished_at)->not->toBeNull()
         ->and($alpha->fresh()->name)->toBe('Alpha');

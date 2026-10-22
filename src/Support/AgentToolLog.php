@@ -32,6 +32,9 @@ class AgentToolLog
     /** The provider's id of the call under way, set by the turn's tool bridge. */
     protected ?string $callId = null;
 
+    /** @var array<string, string|null> The ability each tool needs, by name, resolved once per process. */
+    protected array $abilities = [];
+
     public static function enabled(): bool
     {
         return (bool) config('packstub-agents.tool_log.enabled', true);
@@ -205,9 +208,33 @@ class AgentToolLog
             'tenant' => $where['tenant'] !== null ? (string) $where['tenant'] : $turn?->tenant,
             'panel' => $where['panel'] ?? $turn?->panel,
             'tool' => $tool,
+            'ability' => $this->ability($tool),
             'arguments' => $this->capped(app(AgentRedactor::class)->redactResult($arguments)),
             'status' => $status,
         ]);
+    }
+
+    /**
+     * The ability a tool needs, by its name, so a proposal the person rejected or a question superseded carries it
+     * though the tool never ran; a tool the server does not list (the model named one that does not exist) has none.
+     */
+    protected function ability(string $tool): ?string
+    {
+        if (! array_key_exists($tool, $this->abilities)) {
+            $this->abilities[$tool] = null;
+
+            foreach (Agents::toolClasses() as $class) {
+                $instance = app($class);
+
+                if ($instance->name() === $tool) {
+                    $this->abilities[$tool] = $instance instanceof AgentTool ? $instance->ability() : null;
+
+                    break;
+                }
+            }
+        }
+
+        return $this->abilities[$tool];
     }
 
     /** A value larger than tool_log.max_bytes as JSON is kept as its first bytes, marked as cut. */
