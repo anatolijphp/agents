@@ -163,19 +163,28 @@ it('checks the budget on the first step only and attaches the dynamic block to t
         ->and((new EnforceBudget)->handle($step(1, [...$history, $question, new Message('assistant', ''), $results]), fn () => 'sent'))->toBe('sent') // the tool step of the same turn
         ->and(fn () => (new EnforceBudget)->handle($step(0, [...$history, $question]), fn () => 'sent'))->toThrow(TurnRefused::class); // the next turn, over the per-minute limit
 
-    // The block rides with the question on the first step and again on the tool step; the history stays as it was.
+    // The block rides with the question on the first step and again on the tool step, written into the question
+    // message itself: the step's messages stay the array laravel/ai sent (its stateful continuation on OpenAI and xAI
+    // replays only unchanged messages, #36), and the history stays as it was.
     $middleware = new AttachContext($agent);
-    $first = $middleware->handle($step(0, [...$history, $question]), fn (PendingStep $s) => $s);
-    $second = $middleware->handle($step(1, [...$history, $question, new Message('assistant', ''), $results]), fn (PendingStep $s) => $s);
+    $firstMessages = [...$history, $question];
+    $first = $middleware->handle($step(0, $firstMessages), fn (PendingStep $s) => $s);
+    $secondMessages = [...$history, $question, new Message('assistant', ''), $results];
+    $second = $middleware->handle($step(1, $secondMessages), fn (PendingStep $s) => $s);
 
-    expect($first->messages[2])->toBeInstanceOf(UserMessage::class)
+    expect($first->messages)->toBe($firstMessages)
+        ->and($first->messages === $firstMessages)->toBeTrue()
+        ->and($second->messages === $secondMessages)->toBeTrue()
+        ->and($first->messages[2])->toBeInstanceOf(UserMessage::class)
         ->and($first->messages[2]->content)->toStartWith("## Now\n")->toEndWith("\n\nHow many widgets are live?")
+        ->and(substr_count($first->messages[2]->content, "## Now\n"))->toBe(1)
         ->and($first->messages[0]->content)->toBe('Earlier question')
         ->and($second->messages[2]->content)->toBe($first->messages[2]->content)
+        ->and(substr_count($second->messages[2]->content, "## Now\n"))->toBe(1)
         ->and($second->messages[4])->toBe($results);
 
     // A turn that resumes a proposal starts on a tool result: nothing to carry the block, so it goes without.
-    $resume = (new AttachContext($agent))->handle($step(0, [...$history, $question, new Message('assistant', ''), $results]), fn (PendingStep $s) => $s);
+    $resume = (new AttachContext($agent))->handle($step(0, [...$history, new UserMessage('How many widgets are live?'), new Message('assistant', ''), $results]), fn (PendingStep $s) => $s);
     expect($resume->messages[2]->content)->toBe('How many widgets are live?');
 
     // The app's middleware sees every step of a turn, the question as typed, in the person's context.
@@ -192,7 +201,8 @@ it('checks the budget on the first step only and attaches the dynamic block to t
     $turn = AgentChat::for($user)->send('How many widgets are live?');
 
     expect($turn->status)->toBe(AgentTurn::DONE, (string) $turn->error)
-        ->and($seen)->toBe([[0, 'How many widgets are live?', $user->id], [1, null, $user->id]]);
+        ->and($seen)->toBe([[0, 'How many widgets are live?', $user->id], [1, null, $user->id]])
+        ->and(ConversationMessage::query()->where('conversation_id', $turn->conversation_id)->where('role', 'user')->value('content'))->toBe('How many widgets are live?');
 });
 
 it('keeps what a turn produced before the provider gave up, with the error, and offers to produce it again', function () {
