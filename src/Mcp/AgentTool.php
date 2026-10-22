@@ -39,6 +39,12 @@ abstract class AgentTool extends Tool
     /** The ability required to see and run this tool; null = any member of the workspace. */
     protected ?string $ability = null;
 
+    /** The ability this tool needs; null = any member of the workspace. */
+    public function ability(): ?string
+    {
+        return $this->ability;
+    }
+
     public function shouldRegister(): bool
     {
         return Agents::allows($this->ability) && $this->tokenRefusal() === null;
