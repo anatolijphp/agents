@@ -51,8 +51,10 @@ abstract class SideAgent implements AgentContract, HasStructuredOutput
 
         $response = $provider->prompt(new AgentPrompt($agent, $input, [], $provider, $model ?? $provider->cheapestTextModel(), $agent->timeout()));
 
-        if ($response instanceof StructuredAgentResponse) {
-            return $response->toArray();
+        // laravel/ai 1.3 answers a structured prompt in prose as a structured response with no fields (1.0 gave a
+        // text response), so an empty one falls through to the text as well.
+        if ($response instanceof StructuredAgentResponse && ($fields = $response->toArray()) !== []) {
+            return $fields;
         }
 
         return static::$textField !== null && trim($response->text) !== '' ? [static::$textField => $response->text] : [];

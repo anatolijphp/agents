@@ -6,6 +6,7 @@ All notable changes to `packstub/agents` are documented here.
 
 ### Fixed
 
+- **A side agent that answered in prose is read again on laravel/ai 1.3.** A title or a summary that the provider (or a test fake) gave as plain text came back empty, because laravel/ai 1.3 hands a prose answer to a structured prompt over as a structured response without fields, where 1.0 gave a text response; the chat kept the question as its title and compression stored no summary. An empty structured answer now falls through to the text, as a text response did.
 - **A chat polled while its turn finished no longer deadlocks with it.** `AgentTurns::reconcile()` — run on every poll and render to fail the turns of a worker that died — was one `UPDATE` over the conversation's active turns. It locked the running turn even when nothing was stale, in the opposite order to the job saving the finished turn; on MySQL/MariaDB a poll at that moment deadlocked with it, and the answer was lost (the turn ended `failed` with the deadlock as its error). The stale turns are now read first and only those are updated, by key: a normal poll writes nothing.
 
 ## 1.10.0 — 2026-10-13
